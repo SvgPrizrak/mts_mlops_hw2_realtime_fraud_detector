@@ -1,3 +1,7 @@
+import time
+
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
 import logging
 import os
 import sys
@@ -16,6 +20,51 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Prometheus metrics
+TRANSACTIONS_TOTAL = Counter(
+    "transactions",
+    "Total number of processed transactions",
+)
+
+FRAUD_DETECTED_TOTAL = Counter(
+    "fraud_detected",
+    "Total number of transactions predicted as fraud",
+)
+
+PROCESSING_ERRORS_TOTAL = Counter(
+    "processing_errors",
+    "Total number of transaction processing errors",
+)
+
+FRAUD_RATIO = Gauge(
+    "fraud_ratio",
+    "Share of fraud transactions among processed transactions",
+)
+
+FRAUD_SCORE = Histogram(
+    "fraud_score",
+    "Distribution of fraud prediction scores",
+    buckets=[
+        0.0,
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
+        1.0,
+    ],
+)
+
+TRANSACTION_PROCESSING_SECONDS = Histogram(
+    "transaction_processing_seconds",
+    "Transaction processing time in seconds",
+)
 
 
 def prepare_input_dataframe(transaction: dict) -> pd.DataFrame:
@@ -44,7 +93,7 @@ def build_score_message(
     fraud_flag: int,
 ) -> dict:
     """
-    Формирует сообщение для выходного Kafka topic scoring.
+    Формирует сообщение для выходного Kafka topic scores.
     """
     return {
         "transaction_id": transaction_id,
@@ -76,6 +125,12 @@ def main() -> None:
     logger.info("Input topic: %s", transactions_topic)
     logger.info("Output topic: %s", scoring_topic)
 
+    start_http_server(8000)
+    logger.info("Prometheus metrics server started on port 8000")
+
+    processed_count = 0
+    fraud_count = 0
+
     wait_for_kafka(kafka_bootstrap_servers)
 
     logger.info("Loading train reference data")
@@ -98,6 +153,8 @@ def main() -> None:
 
     for message in consumer:
         try:
+            started_at = time.perf_counter()
+
             transaction = message.value
 
             transaction_id = str(
@@ -121,6 +178,20 @@ def main() -> None:
                 processed_df=processed_df,
             )
 
+            processing_time = time.perf_counter() - started_at
+
+            TRANSACTIONS_TOTAL.inc()
+            FRAUD_SCORE.observe(score)
+            TRANSACTION_PROCESSING_SECONDS.observe(processing_time)
+
+            processed_count += 1
+            fraud_count += fraud_flag
+
+            if fraud_flag == 1:
+                FRAUD_DETECTED_TOTAL.inc()
+
+            FRAUD_RATIO.set(fraud_count / processed_count)
+
             score_message = build_score_message(
                 transaction=transaction,
                 transaction_id=transaction_id,
@@ -143,6 +214,8 @@ def main() -> None:
             )
 
         except Exception as error:
+            PROCESSING_ERRORS_TOTAL.inc()
+
             logger.exception(
                 "Error while processing Kafka message: %s",
                 error,

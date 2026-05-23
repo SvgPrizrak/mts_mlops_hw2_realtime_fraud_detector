@@ -1,6 +1,6 @@
 # Shad MTS MLOps Project 2
 
-Это учебный проект построения системы обнаружения мошеннических транзакций на основе потоковых данных с использованием Kafka, PostgreSQL, Streamlit UI, Grafana и ML-модели CatBoost.
+Это учебный проект построения системы обнаружения мошеннических транзакций на основе потоковых данных с использованием Kafka, PostgreSQL, Streamlit UI, Prometheus, Grafana и ML-модели CatBoost.
 
 Проект развивает сервис из домашнего задания 1 по MLOps: вместо загрузки статичного файла в контейнер реализована имитация потока транзакций через Kafka. Пользователь загружает `test.csv` через Streamlit UI, каждая строка файла отправляется в Kafka как отдельное сообщение, далее ML-сервис выполняет preprocessing, применяет CatBoost-модель и отправляет результат скоринга в отдельный Kafka topic.
 
@@ -21,9 +21,9 @@
 | **scoring_writer** | Потребитель Kafka, сохраняющий результаты скоринга в PostgreSQL |
 | **PostgreSQL** | Хранилище результатов скоринга |
 | **interface** | Веб-интерфейс Streamlit для загрузки `test.csv` и просмотра результатов |
-| **Prometheus** | Система мониторинга и сбора метрик (фактически в данной работе не используется) |
-| **Grafana** | Визуализация метрик и построение dashboard на основе PostgreSQL |
-| **Node Exporter** | Сбор системных метрик контейнеров/хоста |
+| **Prometheus** | Система мониторинга и сбора метрик сервисов |
+| **Grafana** | Визуализация метрик Prometheus и данных из PostgreSQL |
+| **Node Exporter** | Сбор системных метрик контейнера/хоста |
 
 Общий поток данных:
 
@@ -43,6 +43,14 @@ PostgreSQL table: scores
 Streamlit UI + Grafana
 ```
 
+Параллельно сервисы `fraud_detector`, `scoring_writer` и `node-exporter` отдают Prometheus-метрики:
+
+```text
+fraud_detector:8000/metrics
+scoring_writer:8001/metrics
+node-exporter:9100/metrics
+```
+
 ---
 
 ## Структура проекта
@@ -59,7 +67,7 @@ Streamlit UI + Grafana
 │   │   ├── preprocessing.py
 │   │   └── scorer.py
 │   ├── train_data/
-│   │   └── train.csv               # Не хранится в GitHub, нужно положить локально
+│   │   └── .gitkeep                # train.csv нужно положить локально
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── interface/                      # Веб-интерфейс Streamlit
@@ -152,19 +160,20 @@ cat_id
 
 ### 6. Визуализация в Grafana
 
-Grafana содержит dashboard:
+В Grafana доступны dashboards:
 
-```text
-Realtime Fraud Detection PostgreSQL Dashboard
-```
+- `Realtime Fraud Detection PostgreSQL Dashboard`
+- `Fraud Detection Dashboard`
+- `Scoring Dashboard`
+- `Node Metrics`
 
-В нём реализованы:
+Основной dashboard для зачёта на 5 — `Realtime Fraud Detection PostgreSQL Dashboard`. Он строится на основе PostgreSQL-таблицы `scores`.
 
-- фильтр по `us_state`;
-- фильтр по `merch`;
-- график распределения скоров;
-- TPS обработки транзакций;
-- barplot средней доли фродовых транзакций по `cat_id` в последних 1000 транзакциях.
+Дополнительные dashboards из шаблона используют Prometheus-метрики:
+
+- `Fraud Detection Dashboard` — метрики ML-сервиса `fraud_detector`;
+- `Scoring Dashboard` — метрики сервиса записи `scoring_writer`;
+- `Node Metrics` — системные метрики из `node-exporter`.
 
 ---
 
@@ -176,7 +185,8 @@ Realtime Fraud Detection PostgreSQL Dashboard
 - **PostgreSQL**: хранение результатов скоринга
 - **Streamlit**: пользовательский интерфейс
 - **Docker / Docker Compose**: запуск всех сервисов
-- **Prometheus**: сбор метрик
+- **Prometheus**: сбор метрик сервисов
+- **Node Exporter**: сбор системных метрик
 - **Grafana**: визуализация результатов и метрик
 
 ---
@@ -325,6 +335,10 @@ Kafka UI доступен на порту `8081`, потому что локал
 PostgreSQL: postgres:5432
 Kafka UI: kafka-ui:8080
 Kafka: kafka:9092
+Prometheus: prometheus:9090
+Node Exporter: node-exporter:9100
+fraud_detector metrics: fraud_detector:8000
+scoring_writer metrics: scoring_writer:8001
 ```
 
 Поэтому в `grafana/provisioning/datasources/postgres.yaml` должен оставаться адрес:
@@ -333,7 +347,11 @@ Kafka: kafka:9092
 url: postgres:5432
 ```
 
-Не нужно менять его на `localhost:5433`, потому что Grafana работает внутри Docker-сети.
+А в `grafana/provisioning/datasources/prometheus.yaml` должен оставаться адрес:
+
+```yaml
+url: http://prometheus:9090
+```
 
 ---
 
@@ -495,6 +513,115 @@ FROM scores;
 
 ---
 
+## Prometheus
+
+Откройте Prometheus:
+
+```text
+http://localhost:9090
+```
+
+Проверить состояние targets:
+
+```text
+Status → Targets
+```
+
+Ожидаемые targets:
+
+| Target | Назначение |
+|--------|------------|
+| `prometheus:9090` | Метрики самого Prometheus |
+| `node-exporter:9100` | Системные метрики |
+| `fraud_detector:8000` | Метрики ML-сервиса |
+| `scoring_writer:8001` | Метрики сервиса записи в PostgreSQL |
+
+Все targets должны быть в статусе:
+
+```text
+UP
+```
+
+### Метрики fraud_detector
+
+Сервис `fraud_detector` отдаёт метрики на:
+
+```text
+fraud_detector:8000/metrics
+```
+
+Основные метрики:
+
+| Метрика | Описание |
+|---------|----------|
+| `transactions_total` | Количество обработанных транзакций |
+| `fraud_detected_total` | Количество транзакций с `fraud_flag == 1` |
+| `processing_errors_total` | Количество ошибок обработки сообщений |
+| `fraud_ratio` | Доля фродовых транзакций среди обработанных |
+| `fraud_score_bucket` | Histogram распределения fraud score |
+| `transaction_processing_seconds_count` | Количество замеров времени обработки |
+| `transaction_processing_seconds_sum` | Суммарное время обработки |
+
+### Метрики scoring_writer
+
+Сервис `scoring_writer` отдаёт метрики на:
+
+```text
+scoring_writer:8001/metrics
+```
+
+Основные метрики:
+
+| Метрика | Описание |
+|---------|----------|
+| `scorings_total` | Количество записей, сохранённых в PostgreSQL |
+| `scoring_write_errors_total` | Количество ошибок записи в PostgreSQL |
+| `scoring_db_write_seconds_count` | Количество замеров времени записи |
+| `scoring_db_write_seconds_sum` | Суммарное время записи |
+| `scoring_fraud_score_bucket` | Histogram распределения записанных scores |
+
+### Проверка метрик вручную
+
+После отправки транзакций через Streamlit в Prometheus можно проверить запросы:
+
+```text
+up
+```
+
+```text
+transactions_total
+```
+
+```text
+fraud_ratio
+```
+
+```text
+fraud_score_bucket
+```
+
+```text
+transaction_processing_seconds_count
+```
+
+```text
+scorings_total
+```
+
+```text
+scoring_db_write_seconds_count
+```
+
+```text
+scoring_fraud_score_bucket
+```
+
+```text
+node_cpu_seconds_total
+```
+
+---
+
 ## Grafana
 
 Откройте Grafana:
@@ -509,13 +636,26 @@ http://localhost:3000
 admin / admin
 ```
 
-Основной dashboard для зачёта на 5:
+В проекте доступны dashboards:
+
+| Dashboard | Источник данных | Описание |
+|-----------|-----------------|----------|
+| `Realtime Fraud Detection PostgreSQL Dashboard` | PostgreSQL | Основной dashboard для зачёта на 5 |
+| `Fraud Detection Dashboard` | Prometheus | Метрики ML-сервиса `fraud_detector` |
+| `Scoring Dashboard` | Prometheus | Метрики сервиса `scoring_writer` |
+| `Node Metrics` | Prometheus + Node Exporter | Системные метрики |
+
+---
+
+## Основной Grafana dashboard на зачёт 5
+
+Dashboard:
 
 ```text
 Realtime Fraud Detection PostgreSQL Dashboard
 ```
 
-Dashboard использует PostgreSQL datasource с uid:
+использует PostgreSQL datasource с uid:
 
 ```text
 postgres-ds
@@ -531,12 +671,45 @@ Dashboard содержит:
 
 ---
 
-## Важный момент про Grafana
+## Дополнительные Prometheus dashboards
 
-Dashboard JSON должен лежать именно здесь:
+### Fraud Detection Dashboard
+
+Использует Prometheus-метрики сервиса `fraud_detector`:
+
+- `transactions_total`;
+- `fraud_ratio`;
+- `fraud_score_bucket`;
+- `transaction_processing_seconds_sum`;
+- `transaction_processing_seconds_count`.
+
+### Scoring Dashboard
+
+Использует Prometheus-метрики сервиса `scoring_writer`:
+
+- `scorings_total`;
+- `scoring_db_write_seconds_sum`;
+- `scoring_db_write_seconds_count`;
+- `fraud_detected_total`;
+- `scoring_fraud_score_bucket`.
+
+### Node Metrics
+
+Использует стандартные метрики `node-exporter`:
+
+- `node_cpu_seconds_total`;
+- `node_memory_*`;
+- `node_network_*`;
+- `node_disk_*`.
+
+---
+
+## Важный момент про Grafana provisioning
+
+Dashboard JSON должен лежать здесь:
 
 ```text
-grafana/dashboards/fraud_postgres_dashboard.json
+grafana/dashboards/
 ```
 
 В папке `grafana/provisioning/dashboards/` должен лежать только конфигурационный YAML:
@@ -564,29 +737,35 @@ options:
 docker exec -it grafana ls -la /var/lib/grafana/dashboards
 ```
 
-В списке должен быть файл:
+В списке должны быть файлы:
 
 ```text
+fraud_detector.json
+node_exporter.json
+scoring.json
 fraud_postgres_dashboard.json
 ```
 
 ---
 
-## Проверка Grafana datasource
+## Важный момент про Grafana datasources
 
-Файл PostgreSQL datasource:
+### PostgreSQL datasource
+
+Файл:
 
 ```text
 grafana/provisioning/datasources/postgres.yaml
 ```
 
-Должен содержать подключение:
+Должен содержать:
 
 ```yaml
+uid: postgres-ds
 url: postgres:5432
 ```
 
-Не нужно менять его на `localhost:5433`.
+Не нужно менять `postgres:5432` на `localhost:5433`.
 
 Объяснение:
 
@@ -595,47 +774,47 @@ postgres:5432 — адрес PostgreSQL внутри docker-compose сети
 localhost:5433 — внешний порт для подключения с компьютера
 ```
 
-Если Grafana пустая, проверьте:
+### Prometheus datasource
 
-1. В PostgreSQL есть данные:
-
-```sql
-SELECT COUNT(*) FROM scores;
-```
-
-2. В dashboard выбран период:
+Файл:
 
 ```text
-Last 24 hours
+grafana/provisioning/datasources/prometheus.yaml
 ```
 
-3. Фильтры `us_state` и `merch` стоят в значении:
+Должен содержать:
 
-```text
-All
+```yaml
+uid: PBFA97CFB590B2093
+url: http://prometheus:9090
 ```
 
-4. PostgreSQL datasource проходит проверку (ВАЖНЫЙ МОМЕНТ - БЕЗ ЭТОГО ПУНКТА КОНКРЕТНО У МЕНЯ ДАШБОРД СНАЧАЛА НЕ ПОЯВИЛСЯ):
+UID `PBFA97CFB590B2093` нужен для старых dashboards:
 
-```text
-Grafana → Connections → Data sources → PostgreSQL → Save & test
-```
+- `fraud_detector.json`;
+- `node_exporter.json`;
+- `scoring.json`.
+
+Если UID будет отличаться, панели могут не найти datasource.
 
 ---
 
 ## Мониторинг и метрики
 
-Проект включает Prometheus и Grafana.
+Проект включает два типа визуализации:
 
-Доступны dashboards из шаблона:
+1. **Бизнес/ML-аналитика через PostgreSQL**
+   - фильтры по `us_state` и `merch`;
+   - распределение scores;
+   - TPS;
+   - fraud rate по `cat_id`.
 
-- Fraud Detection Dashboard;
-- Scoring Dashboard;
-- Node Metrics.
-
-Также добавлен dashboard на основе PostgreSQL:
-
-- Realtime Fraud Detection PostgreSQL Dashboard.
+2. **Технический мониторинг через Prometheus**
+   - обработанные транзакции;
+   - доля fraud;
+   - latency обработки;
+   - скорость записи в PostgreSQL;
+   - системные метрики CPU, memory, disk, network.
 
 ---
 
@@ -732,7 +911,68 @@ SELECT COUNT(*) FROM scores;
 - путь dashboard JSON: `grafana/dashboards/fraud_postgres_dashboard.json`;
 - адрес в datasource: `postgres:5432`, а не `localhost:5433`.
 
-### 4. Kafka topic `scores` пустой
+### 4. Grafana Prometheus dashboards пустые
+
+Проверьте Prometheus:
+
+```text
+http://localhost:9090
+```
+
+Далее:
+
+```text
+Status → Targets
+```
+
+Targets должны быть в статусе `UP`:
+
+```text
+prometheus
+node-exporter
+fraud_detector
+scoring_writer
+```
+
+Если target `fraud_detector` или `scoring_writer` в статусе `DOWN`, значит соответствующий сервис не отдаёт `/metrics`.
+
+Проверьте логи:
+
+```bash
+docker-compose logs fraud_detector --tail=100
+docker-compose logs scoring_writer --tail=100
+docker-compose logs prometheus --tail=100
+```
+
+### 5. Prometheus пишет `connection refused`
+
+Если Prometheus показывает ошибки:
+
+```text
+connect: connection refused
+```
+
+для:
+
+```text
+fraud_detector:8000
+scoring_writer:8001
+```
+
+проверьте, что в сервисах запущен metrics server:
+
+```python
+start_http_server(8000)
+start_http_server(8001)
+```
+
+Также проверьте, что в `requirements.txt` сервисов есть:
+
+```text
+prometheus_client==0.16.0
+```
+
+### 6. Kafka topic `scores` пустой
 
 Проверьте логи ML-сервиса:
 
@@ -749,7 +989,7 @@ Sent score to topic=scores
 
 Если их нет, проверьте topic `transactions`.
 
-### 5. PostgreSQL пустой, но topic `scores` содержит сообщения
+### 7. PostgreSQL пустой, но topic `scores` содержит сообщения
 
 Проверьте логи сервиса записи:
 
@@ -791,67 +1031,33 @@ http://localhost:8081
 SELECT COUNT(*) FROM scores;
 ```
 
-6. Откройте вкладку Streamlit:
+6. Проверьте Prometheus targets:
+
+```text
+http://localhost:9090 → Status → Targets
+```
+
+7. Проверьте метрики Prometheus:
+
+```text
+transactions_total
+scorings_total
+node_cpu_seconds_total
+```
+
+8. Откройте вкладку Streamlit:
 
 ```text
 Посмотреть результаты
 ```
 
-7. Откройте Grafana dashboard:
+9. Откройте Grafana dashboards:
 
 ```text
 Realtime Fraud Detection PostgreSQL Dashboard
+Fraud Detection Dashboard
+Scoring Dashboard
+Node Metrics
 ```
 
-## Соответствие требованиям задания
-
-### Базовые требования реализации
-
-| Требование | Реализация в проекте |
-|-----------|----------------------|
-| Сервис скоринга читает сообщения из Kafka | Сервис `fraud_detector` читает сообщения из Kafka topic `transactions` |
-| Сервис выгружает score модели и fraud flag в Kafka | Сервис `fraud_detector` отправляет результат в Kafka topic `scores` |
-| Препроцессинг данных реализован в отдельном скрипте | Логика preprocessing вынесена в `fraud_detector/src/preprocessing.py` |
-| Скоринг обработанного сообщения реализован отдельно | Логика загрузки модели и inference вынесена в `fraud_detector/src/scorer.py` |
-| Сервис выполняет только inference | Обучение модели внутри контейнеров не выполняется |
-| Inference выполняется на CPU | Используется CatBoost-модель без GPU-зависимостей |
-| Проект оформлен как GitHub-репозиторий | Код проекта размещается в публичном GitHub-репозитории |
-| Подготовлены requirements | У каждого Python-сервиса есть собственный `requirements.txt` |
-| Подготовлен docker-compose.yml | Все сервисы поднимаются через `docker-compose.yml` |
-
----
-
-### Зачёт на 4
-
-| Требование | Реализация в проекте |
-|-----------|----------------------|
-| Проект загружен в GitHub | Репозиторий: `https://github.com/SvgPrizrak/mts_mlops_hw2_realtime_fraud_detector` |
-| `docker-compose.yml` поднимает стабильно работающие контейнеры | Все сервисы описаны в `docker-compose.yml` |
-| Имитация потока поставки данных сделана через UI | Streamlit UI позволяет загрузить `test.csv` и отправить строки в Kafka |
-| Сервис читает из Kafka сообщения из файла `test.csv` | Streamlit отправляет строки файла в topic `transactions`, `fraud_detector` читает этот topic |
-| Сервис выдаёт score и fraud flag | `fraud_detector` рассчитывает `score` и `fraud_flag` |
-| В сервисе есть модель, и она применяется | CatBoost-модель загружается из `fraud_detector/models/my_catboost.cbm` и используется через `predict_proba` |
-| PostgreSQL поднимается в той же сети | PostgreSQL описан как отдельный сервис в `docker-compose.yml` |
-| Создаётся витрина для хранения идентификаторов транзакций и скоров | Таблица `scores` создаётся через `postgres/init.sql` |
-| Есть дополнительный сервис записи результатов в PostgreSQL | `scoring_writer` читает topic `scores` и пишет данные в PostgreSQL |
-| Topic `scores` содержит `transaction_id`, `score`, `fraud_flag` | Эти поля являются обязательными в сообщении результата скоринга |
-| UI показывает 10 последних fraud-транзакций | Вкладка Streamlit `Посмотреть результаты` выводит последние записи с `fraud_flag == 1` |
-| UI показывает гистограмму последних 100 скоров | Вкладка Streamlit `Посмотреть результаты` строит гистограмму `score` по последним 100 транзакциям |
-
-Важно: по заданию для topic `scores` обязательными являются поля `transaction_id`, `score` и `fraud_flag`. В проекте дополнительно передаются и сохраняются поля `us_state`, `merch` и `cat_id`, так как они необходимы для реализации требований зачёта на 5 в Grafana.
-
----
-
-### Зачёт на 5
-
-| Требование | Реализация в проекте |
-|-----------|----------------------|
-| В Grafana есть фильтр по штатам (`us_state`) | Реализован фильтр `us_state` в dashboard `Realtime Fraud Detection PostgreSQL Dashboard` |
-| В Grafana есть фильтр по мерчантам (`merch`) | Реализован фильтр `merch` в dashboard `Realtime Fraud Detection PostgreSQL Dashboard` |
-| Пользователь может выбрать значения фильтров | Фильтры `us_state` и `merch` позволяют выбирать конкретные значения или `All` |
-| График распределения скоров | Панель `Score density distribution` |
-| TPS обработки транзакций | Панель `Transactions per second` |
-| Barplot средней доли fraud по категории продукта | Панель `Fraud rate by product category, last 1000 transactions` |
-| Barplot строится по последним 1000 транзакциям | SQL-запрос dashboard ограничивает данные последними 1000 транзакциями |
-
----
+Если все пункты работают, проект закрывает требования домашнего задания и дополнительно содержит технический мониторинг через Prometheus.

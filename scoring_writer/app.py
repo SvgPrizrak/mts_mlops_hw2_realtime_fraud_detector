@@ -3,6 +3,8 @@ import logging
 import os
 import time
 
+from prometheus_client import Counter, Histogram, start_http_server
+
 import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
 
@@ -12,6 +14,41 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Prometheus metrics
+SCORINGS_TOTAL = Counter(
+    "scorings",
+    "Total number of scoring records written to PostgreSQL",
+)
+
+SCORING_WRITE_ERRORS_TOTAL = Counter(
+    "scoring_write_errors",
+    "Total number of errors while writing scoring records to PostgreSQL",
+)
+
+SCORING_DB_WRITE_SECONDS = Histogram(
+    "scoring_db_write_seconds",
+    "Time spent writing scoring record to PostgreSQL",
+)
+
+SCORING_FRAUD_SCORE = Histogram(
+    "scoring_fraud_score",
+    "Distribution of scores written to PostgreSQL",
+    buckets=[
+        0.0,
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
+        1.0,
+    ],
+)
 
 
 def wait_for_kafka(
@@ -87,7 +124,7 @@ def create_scores_consumer(
     bootstrap_servers: str,
 ) -> KafkaConsumer:
     """
-    Создаёт consumer для topic scoring.
+    Создаёт consumer для topic scores.
     """
     return KafkaConsumer(
         topic,
@@ -183,6 +220,9 @@ def main() -> None:
     logger.info("Starting scoring writer service")
     logger.info("Reading Kafka topic: %s", scoring_topic)
 
+    start_http_server(8001)
+    logger.info("Prometheus metrics server started on port 8001")
+
     wait_for_kafka(kafka_bootstrap_servers)
 
     conn = wait_for_postgres()
@@ -199,10 +239,18 @@ def main() -> None:
         try:
             row = message.value
 
+            started_at = time.perf_counter()
+
             insert_score(
                 conn=conn,
                 row=row,
             )
+
+            write_time = time.perf_counter() - started_at
+
+            SCORINGS_TOTAL.inc()
+            SCORING_DB_WRITE_SECONDS.observe(write_time)
+            SCORING_FRAUD_SCORE.observe(float(row.get("score")))
 
             logger.info(
                 "Inserted score for transaction_id=%s score=%s fraud_flag=%s",
@@ -212,6 +260,8 @@ def main() -> None:
             )
 
         except Exception as error:
+            SCORING_WRITE_ERRORS_TOTAL.inc()
+
             logger.exception(
                 "Failed to insert score message into PostgreSQL: %s",
                 error,
