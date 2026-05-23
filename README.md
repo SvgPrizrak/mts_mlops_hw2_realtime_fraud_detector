@@ -907,7 +907,7 @@ SELECT COUNT(*) FROM scores;
 
 - dashboard time range: `Last 24 hours`;
 - фильтры `us_state` и `merch`: `All`;
-- PostgreSQL datasource: `Save & test`;
+- PostgreSQL datasource: `Connections > Data sources > PostgreSQL > Save & test`;
 - путь dashboard JSON: `grafana/dashboards/fraud_postgres_dashboard.json`;
 - адрес в datasource: `postgres:5432`, а не `localhost:5433`.
 
