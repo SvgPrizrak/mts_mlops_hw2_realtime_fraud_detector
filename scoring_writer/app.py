@@ -1,125 +1,227 @@
 import json
 import logging
 import os
+import time
 
 import psycopg2
-from confluent_kafka import Consumer
-from prometheus_client import start_http_server, Summary, Counter, Histogram, Gauge
+from kafka import KafkaConsumer, KafkaProducer
 
-# Настройка логгирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
-# Определяем метрики
-DB_WRITE_TIME = Summary('scoring_db_write_seconds', 'Время записи скоринга в БД')
-SCORING_COUNT = Counter('scorings_total', 'Общее количество записанных скорингов')
-FRAUD_SCORE_HISTOGRAM = Histogram('scoring_fraud_score', 'Распределение записанных скоров мошенничества', 
-                                buckets=[i/50.0 for i in range(51)])  # [0.0, 0.02, 0.04, ..., 0.98, 1.0]
-FRAUD_COUNT = Counter('fraud_detected_total', 'Количество обнаруженных мошеннических транзакций')
 
-def get_db_config():
-    return {
-        "host": os.getenv("POSTGRES_HOST"),
-        "port": os.getenv("POSTGRES_PORT"),
-        "database": os.getenv("POSTGRES_DB"),
-        "user": os.getenv("POSTGRES_USER"),
-        "password": os.getenv("POSTGRES_PASSWORD"),
-    }
+def wait_for_kafka(
+    bootstrap_servers: str,
+    retries: int = 40,
+    delay: int = 3,
+) -> None:
+    """
+    Ждёт доступности Kafka.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            producer = KafkaProducer(
+                bootstrap_servers=bootstrap_servers,
+            )
+            producer.close()
 
+            logger.info("Kafka is available")
+            return
 
-def create_table(conn):
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS scores (
-                id SERIAL PRIMARY KEY,
-                transaction_id TEXT NOT NULL,
-                score FLOAT NOT NULL,
-                fraud_flag INT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        conn.commit()
-        logger.info("Таблица 'scores' проверена или создана.")
+        except Exception as error:
+            logger.warning(
+                "Kafka is not available yet. Attempt %s/%s. Error: %s",
+                attempt,
+                retries,
+                error,
+            )
+            time.sleep(delay)
 
-
-@DB_WRITE_TIME.time()
-def insert_score(conn, data):
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO scores (transaction_id, score, fraud_flag)
-            VALUES (%s, %s, %s);
-        """, (data["transaction_id"], data["score"], data["fraud_flag"]))
-        conn.commit()
-    
-    # Обновляем метрики
-    SCORING_COUNT.inc()
-    FRAUD_SCORE_HISTOGRAM.observe(data["score"])
-    
-    if data["fraud_flag"] == 1:
-        FRAUD_COUNT.inc()
+    raise RuntimeError("Kafka is not available")
 
 
-def run_consumer():
-    # Запуск HTTP-сервера для Prometheus
-    start_http_server(8001)
-    logger.info("Prometheus метрики доступны на порту 8001")
-    
-    kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS")
-    scoring_topic = os.getenv("KAFKA_SCORING_TOPIC")
+def wait_for_postgres(
+    retries: int = 40,
+    delay: int = 3,
+):
+    """
+    Ждёт доступности PostgreSQL и возвращает connection.
+    """
+    host = os.getenv("POSTGRES_HOST", "postgres")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    dbname = os.getenv("POSTGRES_DB", "fraud_db")
+    user = os.getenv("POSTGRES_USER", "fraud_user")
+    password = os.getenv("POSTGRES_PASSWORD", "fraud_pass")
 
-    consumer_config = {
-        'bootstrap.servers': kafka_bootstrap_servers,
-        'group.id': 'scoring-writer',
-        'auto.offset.reset': 'earliest',
-    }
+    for attempt in range(1, retries + 1):
+        try:
+            conn = psycopg2.connect(
+                host=host,
+                port=port,
+                dbname=dbname,
+                user=user,
+                password=password,
+            )
 
-    logger.info(f"Подключение к Kafka: {kafka_bootstrap_servers}, топик: {scoring_topic}")
-    consumer = Consumer(consumer_config)
-    consumer.subscribe([scoring_topic])
+            logger.info("PostgreSQL is available")
+            return conn
 
-    db_config = get_db_config()
-    conn = psycopg2.connect(**db_config)
-    create_table(conn)
+        except Exception as error:
+            logger.warning(
+                "PostgreSQL is not available yet. Attempt %s/%s. Error: %s",
+                attempt,
+                retries,
+                error,
+            )
+            time.sleep(delay)
 
-    try:
-        while True:
-            msg = consumer.poll(1.0)
-            if msg is None:
-                logger.debug("Ожидание сообщений...")
-                continue
-            if msg.error():
-                logger.error(f"Kafka error: {msg.error()}")
-                continue
+    raise RuntimeError("PostgreSQL is not available")
+
+
+def create_scores_consumer(
+    topic: str,
+    bootstrap_servers: str,
+) -> KafkaConsumer:
+    """
+    Создаёт consumer для topic scoring.
+    """
+    return KafkaConsumer(
+        topic,
+        bootstrap_servers=bootstrap_servers,
+        group_id="scoring-writer",
+        auto_offset_reset="earliest",
+        enable_auto_commit=True,
+        value_deserializer=lambda value: json.loads(value.decode("utf-8")),
+    )
+
+
+def ensure_scores_table_exists(conn) -> None:
+    """
+    Создаёт таблицу scores, если init.sql по какой-то причине не отработал.
+    """
+    query = """
+        CREATE TABLE IF NOT EXISTS scores (
+            id SERIAL PRIMARY KEY,
+            transaction_id TEXT NOT NULL,
+            score DOUBLE PRECISION NOT NULL,
+            fraud_flag INTEGER NOT NULL,
+            us_state TEXT,
+            merch TEXT,
+            cat_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scores_created_at ON scores(created_at);
+        CREATE INDEX IF NOT EXISTS idx_scores_fraud_flag ON scores(fraud_flag);
+        CREATE INDEX IF NOT EXISTS idx_scores_us_state ON scores(us_state);
+        CREATE INDEX IF NOT EXISTS idx_scores_merch ON scores(merch);
+        CREATE INDEX IF NOT EXISTS idx_scores_cat_id ON scores(cat_id);
+    """
+
+    with conn.cursor() as cursor:
+        cursor.execute(query)
+
+    conn.commit()
+
+    logger.info("scores table is ready")
+
+
+def insert_score(conn, row: dict) -> None:
+    """
+    Записывает один результат скоринга в PostgreSQL.
+    """
+    query = """
+        INSERT INTO scores (
+            transaction_id,
+            score,
+            fraud_flag,
+            us_state,
+            merch,
+            cat_id
+        )
+        VALUES (%s, %s, %s, %s, %s, %s);
+    """
+
+    transaction_id = str(row.get("transaction_id"))
+    score = float(row.get("score"))
+    fraud_flag = int(row.get("fraud_flag"))
+    us_state = row.get("us_state")
+    merch = row.get("merch")
+    cat_id = row.get("cat_id")
+
+    with conn.cursor() as cursor:
+        cursor.execute(
+            query,
+            (
+                transaction_id,
+                score,
+                fraud_flag,
+                us_state,
+                merch,
+                cat_id,
+            ),
+        )
+
+    conn.commit()
+
+
+def main() -> None:
+    kafka_bootstrap_servers = os.getenv(
+        "KAFKA_BOOTSTRAP_SERVERS",
+        "kafka:9092",
+    )
+
+    scoring_topic = os.getenv(
+        "KAFKA_SCORING_TOPIC",
+        "scores",
+    )
+
+    logger.info("Starting scoring writer service")
+    logger.info("Reading Kafka topic: %s", scoring_topic)
+
+    wait_for_kafka(kafka_bootstrap_servers)
+
+    conn = wait_for_postgres()
+    ensure_scores_table_exists(conn)
+
+    consumer = create_scores_consumer(
+        topic=scoring_topic,
+        bootstrap_servers=kafka_bootstrap_servers,
+    )
+
+    logger.info("Scoring writer started. Waiting for scored messages...")
+
+    for message in consumer:
+        try:
+            row = message.value
+
+            insert_score(
+                conn=conn,
+                row=row,
+            )
+
+            logger.info(
+                "Inserted score for transaction_id=%s score=%s fraud_flag=%s",
+                row.get("transaction_id"),
+                row.get("score"),
+                row.get("fraud_flag"),
+            )
+
+        except Exception as error:
+            logger.exception(
+                "Failed to insert score message into PostgreSQL: %s",
+                error,
+            )
 
             try:
-                value_str = msg.value().decode('utf-8')
-                logger.debug(f"Получено сообщение: {value_str}")
-                data_list = json.loads(value_str)
-
-                # Проверяем, что это список
-                if isinstance(data_list, list):
-                    for data in data_list:
-                        required_keys = ['transaction_id', 'score', 'fraud_flag']
-                        if not all(k in data for k in required_keys):
-                            logger.error(f"Некорректный формат элемента: {data}")
-                            continue
-                        insert_score(conn, data)
-                        logger.info(f"Записано в БД: {data['transaction_id']}")
-                else:
-                    logger.error(f"Ожидался список, получен: {type(data_list)}")
-
-            except json.JSONDecodeError as je:
-                logger.exception(f"Ошибка декодирования JSON: {je}")
-            except Exception as e:
-                logger.exception(f"Ошибка обработки сообщения: {e}")
-
-    except KeyboardInterrupt:
-        logger.info("Потребитель остановлен пользователем.")
-    finally:
-        consumer.close()
-        conn.close()
+                conn.rollback()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
-    logger.info("Запуск потребителя и писателя в БД...")
-    run_consumer()
+    main()

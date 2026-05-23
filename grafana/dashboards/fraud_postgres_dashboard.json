@@ -1,0 +1,250 @@
+{
+  "id": null,
+  "uid": "fraud-postgres-dashboard",
+  "title": "Realtime Fraud Detection PostgreSQL Dashboard",
+  "tags": [
+    "fraud",
+    "mlops",
+    "postgres",
+    "kafka"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "editable": true,
+  "style": "dark",
+  "graphTooltip": 0,
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "us_state",
+        "type": "query",
+        "label": "US State",
+        "datasource": {
+          "type": "postgres",
+          "uid": "postgres-ds"
+        },
+        "query": "SELECT DISTINCT us_state FROM scores WHERE us_state IS NOT NULL ORDER BY us_state;",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": true,
+        "allValue": "All",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "All"
+        },
+        "hide": 0
+      },
+      {
+        "name": "merch",
+        "type": "query",
+        "label": "Merchant",
+        "datasource": {
+          "type": "postgres",
+          "uid": "postgres-ds"
+        },
+        "query": "SELECT DISTINCT merch FROM scores WHERE merch IS NOT NULL ORDER BY merch;",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": true,
+        "allValue": "All",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "All"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Score density distribution",
+      "type": "barchart",
+      "datasource": {
+        "type": "postgres",
+        "uid": "postgres-ds"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "postgres-ds"
+          },
+          "rawSql": "WITH filtered AS (\n    SELECT score\n    FROM scores\n    WHERE\n      ('${us_state}' = 'All' OR us_state = '${us_state}')\n      AND ('${merch}' = 'All' OR merch = '${merch}')\n    ORDER BY created_at DESC\n    LIMIT 1000\n), buckets AS (\n    SELECT\n      ROUND((FLOOR(score * 20) / 20)::numeric, 2) AS score_bucket,\n      COUNT(*) AS bucket_count\n    FROM filtered\n    GROUP BY 1\n), total AS (\n    SELECT SUM(bucket_count) AS total_count\n    FROM buckets\n)\nSELECT\n    score_bucket::text AS score_bucket,\n    bucket_count::float / NULLIF(total_count, 0) AS density\nFROM buckets, total\nORDER BY score_bucket::float;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "xField": "score_bucket",
+        "showValue": "auto",
+        "stacking": "none",
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Transactions per second",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "postgres-ds"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "postgres-ds"
+          },
+          "rawSql": "SELECT\n  date_trunc('second', created_at) AS \"time\",\n  COUNT(*) AS \"TPS\"\nFROM scores\nWHERE\n  $__timeFilter(created_at)\n  AND ('${us_state}' = 'All' OR us_state = '${us_state}')\n  AND ('${merch}' = 'All' OR merch = '${merch}')\nGROUP BY 1\nORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "showPoints": "auto",
+            "pointSize": 5,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Fraud rate by product category, last 1000 transactions",
+      "type": "barchart",
+      "datasource": {
+        "type": "postgres",
+        "uid": "postgres-ds"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "postgres-ds"
+          },
+          "rawSql": "WITH last_1000 AS (\n    SELECT *\n    FROM scores\n    WHERE\n      ('${us_state}' = 'All' OR us_state = '${us_state}')\n      AND ('${merch}' = 'All' OR merch = '${merch}')\n    ORDER BY created_at DESC\n    LIMIT 1000\n)\nSELECT\n    cat_id,\n    AVG(fraud_flag::float) * 100 AS fraud_rate\nFROM last_1000\nWHERE cat_id IS NOT NULL\nGROUP BY cat_id\nORDER BY fraud_rate DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "xField": "cat_id",
+        "showValue": "auto",
+        "xTickLabelRotation": 45,
+        "xTickLabelSpacing": 0,
+        "stacking": "none",
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    }
+  ]
+}

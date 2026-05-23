@@ -1,11 +1,19 @@
 FROM python:3.11-slim
+
 WORKDIR /app
+
+# Копирование файла зависимостей
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir prometheus_client==0.16.0
+
+# Обновление pip и установка зависимостей
+RUN python -m pip install --upgrade pip --root-user-action=ignore && \
+    pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
+
+# Копирование исходного кода
 COPY . .
 
-# Экспозиция порта для Prometheus
+# Порт для Prometheus metrics, если метрики используются в сервисе
 EXPOSE 8001
 
+# Запуск сервиса записи результатов скоринга в PostgreSQL
 CMD ["python", "app.py"]

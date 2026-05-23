@@ -1,2 +1,13 @@
 [server]
-maxUploadSize = 500  # Максимальный размер файла в MB
+
+# Максимальный размер загружаемого файла в MB
+maxUploadSize = 500
+
+# Запуск Streamlit без открытия браузера внутри контейнера
+headless = true
+
+# Отключаем CORS для локального запуска через docker-compose
+enableCORS = false
+
+# Отключаем XSRF-защиту для учебного локального стенда
+enableXsrfProtection = false
