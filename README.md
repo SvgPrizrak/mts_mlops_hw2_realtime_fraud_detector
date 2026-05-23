@@ -1061,3 +1061,257 @@ Node Metrics
 ```
 
 Если все пункты работают, проект закрывает требования домашнего задания и дополнительно содержит технический мониторинг через Prometheus.
+
+---
+
+## Проверка через консоль некоторых пунктов домашнего задания (которые того требуют)
+
+Перед выполнением команд проект должен быть запущен:
+
+```bash
+docker-compose up --build
+```
+
+Также перед проверкой нужно отправить несколько строк из `test.csv` через Streamlit UI:
+
+```text
+http://localhost:8501
+```
+
+Рекомендуется для проверки отправить 10–100 строк.
+
+---
+
+### 1. Сервис без ошибок читает из Kafka сообщения из файла формата `test.csv`
+
+После отправки файла через Streamlit строки из `test.csv` попадают в Kafka topic `transactions`.
+
+Проверить список Kafka topics:
+
+```bash
+docker exec -it kafka kafka-topics --bootstrap-server kafka:9092 --list
+```
+
+Ожидаемо в списке должен быть topics:
+
+```text
+transactions
+```
+
+Посмотреть первые сообщения из topic `transactions`:
+
+```bash
+docker exec -it kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic transactions --from-beginning --max-messages 3
+```
+
+Ожидаемый результат — JSON-сообщения с транзакциями из `test.csv`.
+
+Также можно проверить логи сервиса `fraud_detector`:
+
+```bash
+docker-compose logs fraud_detector --tail=100
+```
+
+Ожидаемые строки в логах:
+
+```text
+Received transaction_id=...
+Prediction completed. score=...
+Sent score to topic=scores ...
+```
+
+Это подтверждает, что сервис читает сообщения из Kafka topic `transactions`, выполняет preprocessing и применяет модель.
+
+---
+
+### 2. Сервис без ошибок читает из Kafka сообщения со скором и флагом фрода
+
+После обработки транзакции сервис `fraud_detector` отправляет результат скоринга в Kafka topic `scores`.
+
+Проверить, что topic `scores` существует:
+
+```bash
+docker exec -it kafka kafka-topics --bootstrap-server kafka:9092 --list
+```
+
+Ожидаемо в списке должен быть topic:
+
+```text
+scores
+```
+
+Посмотреть сообщения в topic `scores`:
+
+```bash
+docker exec -it kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic scores --from-beginning --max-messages 3
+```
+
+Ожидаемый формат сообщения:
+
+```json
+{
+  "transaction_id": "0",
+  "score": 0.123456,
+  "fraud_flag": 0,
+  "us_state": "CA",
+  "merch": "...",
+  "cat_id": "..."
+}
+```
+
+Для базового требования задания обязательными являются поля:
+
+```text
+transaction_id
+score
+fraud_flag
+```
+
+Поля `us_state`, `merch` и `cat_id` добавлены дополнительно для реализации Grafana dashboard на зачёт 5.
+
+---
+
+### 3. `docker-compose` поднимает PostgreSQL в той же сети и создаёт витрину для хранения transaction_id и score
+
+Проверить, что контейнер PostgreSQL поднят:
+
+```bash
+docker-compose ps postgres
+```
+
+Ожидаемо контейнер должен быть в статусе `Up`.
+
+Подключиться к PostgreSQL:
+
+```bash
+docker exec -it postgres psql -U fraud_user -d fraud_db
+```
+
+Проверить, что таблица `scores` создана:
+
+```sql
+\dt
+```
+
+Ожидаемо должна быть таблица:
+
+```text
+scores
+```
+
+Проверить структуру таблицы:
+
+```sql
+\d scores
+```
+
+Ожидаемые поля:
+
+```text
+id
+transaction_id
+score
+fraud_flag
+us_state
+merch
+cat_id
+created_at
+```
+
+Проверить, что витрина содержит идентификаторы транзакций и скоры модели:
+
+```sql
+SELECT transaction_id, score, fraud_flag
+FROM scores
+ORDER BY created_at DESC
+LIMIT 10;
+```
+
+Выйти из PostgreSQL:
+
+```sql
+\q
+```
+
+Эта проверка подтверждает, что PostgreSQL поднят через `docker-compose`, находится в общей docker-сети проекта и содержит витрину `scores`.
+
+---
+
+### 4. Дополнительный сервис читает topic `scores` и складывает результат в PostgreSQL
+
+Дополнительный сервис называется:
+
+```text
+scoring_writer
+```
+
+Он читает Kafka topic `scores` и записывает результаты в PostgreSQL-таблицу `scores`.
+
+Проверить, что контейнер `scoring_writer` поднят:
+
+```bash
+docker-compose ps scoring_writer
+```
+
+Ожидаемо контейнер должен быть в статусе `Up`.
+
+Проверить логи `scoring_writer`:
+
+```bash
+docker-compose logs scoring_writer --tail=100
+```
+
+Ожидаемые строки:
+
+```text
+Scoring writer started. Waiting for scored messages...
+Inserted score for transaction_id=...
+```
+
+Проверить, что записи действительно появились в PostgreSQL:
+
+```bash
+docker exec -it postgres psql -U fraud_user -d fraud_db -c "SELECT COUNT(*) FROM scores;"
+```
+
+Проверить последние сохранённые результаты скоринга:
+
+```bash
+docker exec -it postgres psql -U fraud_user -d fraud_db -c "SELECT transaction_id, score, fraud_flag FROM scores ORDER BY created_at DESC LIMIT 10;"
+```
+
+Ожидаемый результат — таблица с заполненными полями:
+
+```text
+transaction_id
+score
+fraud_flag
+```
+
+Это подтверждает, что `scoring_writer` читает сообщения из topic `scores` и сохраняет результат в PostgreSQL.
+
+---
+
+### 5. Быстрая проверка всех пунктов одной группой команд
+
+После отправки строк через Streamlit можно выполнить:
+
+```bash
+docker-compose ps
+
+docker exec -it kafka kafka-topics --bootstrap-server kafka:9092 --list
+
+docker exec -it kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic transactions --from-beginning --max-messages 1
+
+docker exec -it kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic scores --from-beginning --max-messages 1
+
+docker-compose logs fraud_detector --tail=50
+
+docker-compose logs scoring_writer --tail=50
+
+docker exec -it postgres psql -U fraud_user -d fraud_db -c "SELECT COUNT(*) FROM scores;"
+
+docker exec -it postgres psql -U fraud_user -d fraud_db -c "SELECT transaction_id, score, fraud_flag FROM scores ORDER BY created_at DESC LIMIT 10;"
+```
+
+Если команды выполняются без ошибок, topic `transactions` и `scores` содержат сообщения, а PostgreSQL-таблица `scores` содержит `transaction_id`, `score` и `fraud_flag`, значит перечисленные пункты домашнего задания выполнены.
