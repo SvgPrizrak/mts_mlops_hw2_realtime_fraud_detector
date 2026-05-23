@@ -304,7 +304,7 @@ docker compose up --build
 |--------|-------------------|
 | **Streamlit UI** | http://localhost:8501 |
 | **Kafka UI** | http://localhost:8081 |
-| **PostgreSQL** | localhost:5433 |
+| **PostgreSQL** | http://localhost:5433 |
 | **Prometheus** | http://localhost:9090 |
 | **Grafana** | http://localhost:3000 |
 
