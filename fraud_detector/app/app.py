@@ -1,12 +1,10 @@
-import time
-
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
-
 import logging
 import os
 import sys
+import time
 
 import pandas as pd
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 sys.path.append(os.path.abspath("./src"))
 

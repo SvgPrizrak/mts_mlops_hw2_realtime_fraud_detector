@@ -3,10 +3,9 @@ import logging
 import os
 import time
 
-from prometheus_client import Counter, Histogram, start_http_server
-
 import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
+from prometheus_client import Counter, Histogram, start_http_server
 
 logging.basicConfig(
     level=logging.INFO,
